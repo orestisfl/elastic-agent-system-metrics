@@ -20,6 +20,7 @@ package process
 import (
 	"fmt"
 	"os"
+	"os/user"
 	"runtime"
 	"strconv"
 	"testing"
@@ -58,12 +59,22 @@ func TestContainerMonitoringFromInsideContainer(t *testing.T) {
 	stats, err := testStats.GetSelf()
 	require.NoError(t, err)
 	if runtime.GOOS == "linux" {
-		// Cgroups should always be available - cgroup files are world-readable
-		// and our path resolution handles escaped paths like "/../../..." correctly.
-		require.NotNil(t, stats.Cgroup, "cgroup stats should not be nil (uid=%d)", os.Getuid())
-		cgstats, err := stats.Cgroup.Format()
-		require.NoError(t, err)
-		require.NotEmpty(t, cgstats)
+		// When using hostfs with non-root user, overlayfs permissions may deny cgroup access.
+		// Root users should always have cgroup access.
+		if os.Getuid() == 0 {
+			require.NotNil(t, stats.Cgroup, "cgroup stats should not be nil for root (uid=%d)", os.Getuid())
+			cgstats, err := stats.Cgroup.Format()
+			require.NoError(t, err)
+			require.NotEmpty(t, cgstats)
+		} else {
+			// Non-root with hostfs may or may not have cgroup access depending on overlayfs permissions
+			if stats.Cgroup != nil {
+				cgstats, err := stats.Cgroup.Format()
+				require.NoError(t, err)
+				require.NotEmpty(t, cgstats)
+			}
+			// Not asserting nil - it's environment-dependent
+		}
 	}
 
 	require.NotEmpty(t, stats.Cmdline)
@@ -149,10 +160,24 @@ func validateProcResult(t *testing.T, result mapstr.M) {
 	_, privilegedMode := os.LookupEnv("PRIVILEGED")
 	cgroupNSMode := os.Getenv("CGROUPNSMODE")
 	userID := os.Getuid()
-	formatArgs := []any{
-		"privileged=%t userID=%d cgroupNSMode=%s result=%s ",
-		privilegedMode, userID, cgroupNSMode, result.String(),
+
+	usr, err := user.Current()
+	require.NoError(t, err, "error getting current user")
+
+	debugCtx := struct {
+		privileged   bool
+		userID       int
+		user         string
+		cgroupNSMode string
+		result       string
+	}{
+		privileged:   privilegedMode,
+		userID:       userID,
+		user:         usr.Username,
+		cgroupNSMode: cgroupNSMode,
+		result:       result.String(),
 	}
+	formatArgs := []any{"ctx=%+v", debugCtx}
 
 	gotPpid, ok := result["ppid"].(int)
 	assert.True(t, ok, formatArgs...)
@@ -166,23 +191,23 @@ func validateProcResult(t *testing.T, result mapstr.M) {
 	// - OR we own the process
 	// In non-privileged mode, container root is NOT the same as host root due to user namespaces
 	gotUsername, _ := result["username"].(string)
-	isOwnProcess := strconv.Itoa(userID) == gotUsername
+	isOwnProcess := usr.Username == gotUsername
 	isEffectiveRoot := privilegedMode && userID == 0
 	canReadExe := isEffectiveRoot || isOwnProcess
 
 	switch {
 	case gotState == "zombie":
 		// Zombie processes don't have /proc/[pid]/exe - it's gone after exit
-		assert.NotContains(t, result, "exe", formatArgs...)
+		assert.NotContains(t, result, "exe", "zombie process expected to not contain exe: %+v", debugCtx)
 	case isKernelProc:
 		// Kernel processes (ppid=2) don't have exe
-		assert.NotContains(t, result, "exe", formatArgs...)
+		assert.NotContains(t, result, "exe", "kernel process expected to not contain exe: %+v", debugCtx)
 	case canReadExe:
 		// Effective root or process owner can read exe
-		assert.Contains(t, result, "exe", formatArgs...)
+		assert.Contains(t, result, "exe", "expected to be able to read exe: %+v", debugCtx)
 	default:
 		// Non-privileged or non-owner - exe not readable
-		assert.NotContains(t, result, "exe", formatArgs...)
+		assert.NotContains(t, result, "exe", "expected to not be able to read exe: %+v", debugCtx)
 	}
 
 	// if privileged or root, look for data from /proc/[pid]/io
@@ -202,6 +227,8 @@ func validateProcResult(t *testing.T, result mapstr.M) {
 		} else {
 			t.Log("WARN: skipping 'cgroup' check for non-root user (may lack permissions)")
 			t.Logf(formatArgs[0].(string), formatArgs[1:]...)
+			_, contains := result["cgroup"]
+			t.Logf("result would have been: %t", contains)
 		}
 	}
 }
