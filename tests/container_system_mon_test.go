@@ -93,8 +93,7 @@ func TestKernelProc(t *testing.T) {
 }
 
 func TestProcessMetricsElevatedPerms(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), time.Minute*5)
-	defer cancel()
+	ctx := t.Context()
 	// runs test cases where we do not expect any kind of permissions errors
 	baseRunner := systemtests.DockerTestRunner{
 		Runner:            t,
@@ -110,8 +109,10 @@ func TestProcessMetricsElevatedPerms(t *testing.T) {
 }
 
 func TestProcessAllSettings(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), time.Minute*5)
-	defer cancel()
+	// Use t.Context() directly - it inherits timeout from `go test -timeout`.
+	// Using a separate 5-minute timeout caused issues when running 8 subtests
+	// that each take ~45 seconds on slower CI machines (RHEL 9).
+	ctx := t.Context()
 	// runs test cases where we do not expect any kind of permissions errors
 	baseRunner := systemtests.DockerTestRunner{
 		Runner:            t,
