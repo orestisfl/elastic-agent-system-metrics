@@ -59,10 +59,21 @@ func TestContainerMonitoringFromInsideContainer(t *testing.T) {
 	stats, err := testStats.GetSelf()
 	require.NoError(t, err)
 	if runtime.GOOS == "linux" {
-		require.NotNil(t, stats.Cgroup, "cgroup stats should not be nil")
-		cgstats, err := stats.Cgroup.Format()
-		require.NoError(t, err)
-		require.NotEmpty(t, cgstats)
+		_, usingHostfs := os.LookupEnv("HOSTFS")
+		isRoot := os.Getuid() == 0
+
+		// When using /hostfs, cgroup access goes through Docker's overlayfs.
+		// Root can read overlayfs paths, but non-root users (like 'nobody') cannot.
+		if usingHostfs && !isRoot {
+			// Non-root users can't read Docker's overlayfs paths
+			require.Nil(t, stats.Cgroup, "cgroup stats should be nil for non-root user with hostfs (uid=%d)", os.Getuid())
+		} else {
+			// Root users, or users not using hostfs, should have cgroup access
+			require.NotNil(t, stats.Cgroup, "cgroup stats should not be nil (uid=%d, hostfs=%v)", os.Getuid(), usingHostfs)
+			cgstats, err := stats.Cgroup.Format()
+			require.NoError(t, err)
+			require.NotEmpty(t, cgstats)
+		}
 	}
 
 	require.NotEmpty(t, stats.Cmdline)
@@ -89,6 +100,8 @@ func TestSelfMonitoringFromInsideContainer(t *testing.T) {
 	stats, err := testStats.GetSelf()
 	require.NoError(t, err)
 	if runtime.GOOS == "linux" {
+		// This test doesn't use /hostfs, so normal cgroup permissions apply.
+		// All users should be able to read cgroup files.
 		require.NotNil(t, stats.Cgroup, "cgroup stats should not be nil")
 		cgstats, err := stats.Cgroup.Format()
 		require.NoError(t, err)
