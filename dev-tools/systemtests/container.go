@@ -185,8 +185,8 @@ func (tr *DockerTestRunner) RunTestsOnDocker(ctx context.Context, apiClient *cli
 	// iterate by lines to make this easier to read
 	for _, badLine := range tr.FatalLogMessages {
 		for _, line := range strings.Split(result.Stdout, "\n") {
-			// TODO: fix this
-			// See https://github.com/elastic/elastic-agent-system-metrics/issues/270
+			// Non-fatal errors are logged at DEBUG level for expected failures
+			// (e.g., permission denied for non-root users reading cgroup files)
 			if strings.Contains(line, "Non-fatal error") {
 				continue
 			}

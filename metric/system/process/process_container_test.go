@@ -59,9 +59,7 @@ func TestContainerMonitoringFromInsideContainer(t *testing.T) {
 	stats, err := testStats.GetSelf()
 	require.NoError(t, err)
 	if runtime.GOOS == "linux" {
-		if stats.Cgroup == nil {
-			t.Skip("https://github.com/elastic/elastic-agent-system-metrics/issues/270")
-		}
+		require.NotNil(t, stats.Cgroup, "cgroup stats should not be nil")
 		cgstats, err := stats.Cgroup.Format()
 		require.NoError(t, err)
 		require.NotEmpty(t, cgstats)
@@ -91,9 +89,7 @@ func TestSelfMonitoringFromInsideContainer(t *testing.T) {
 	stats, err := testStats.GetSelf()
 	require.NoError(t, err)
 	if runtime.GOOS == "linux" {
-		if stats.Cgroup == nil {
-			t.Skip("https://github.com/elastic/elastic-agent-system-metrics/issues/270")
-		}
+		require.NotNil(t, stats.Cgroup, "cgroup stats should not be nil")
 		cgstats, err := stats.Cgroup.Format()
 		require.NoError(t, err)
 		require.NotEmpty(t, cgstats)
@@ -179,16 +175,12 @@ func validateProcResult(t *testing.T, result mapstr.M) {
 	assert.Contains(t, result, "num_threads", formatArgs...)
 
 	if runtime.GOOS == "linux" {
-		// Cgroups may not be available when:
-		// - Running as non-root user (permission denied accessing cgroup files)
-		// - Private PID namespace with unresolvable cgroup paths (e.g., /../..)
-		// These are treated as non-fatal errors in the metrics collection code.
-		// TODO: fix this
-		// See: https://github.com/elastic/elastic-agent-system-metrics/issues/270
-		if cgroupNSMode == "host" && userID == 0 {
+		// Cgroups should be available when running as root.
+		// Non-root users may get permission denied errors accessing cgroup files.
+		if userID == 0 {
 			assert.Contains(t, result, "cgroup", formatArgs...)
 		} else {
-			t.Log("WARN: skipping 'cgroup' check, this is because of known issue https://github.com/elastic/elastic-agent-system-metrics/issues/270")
+			t.Log("WARN: skipping 'cgroup' check for non-root user (may lack permissions)")
 			t.Logf(formatArgs[0].(string), formatArgs[1:]...)
 		}
 	}
