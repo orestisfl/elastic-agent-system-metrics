@@ -20,7 +20,6 @@ package process
 import (
 	"fmt"
 	"os"
-	"os/user"
 	"runtime"
 	"strconv"
 	"testing"
@@ -155,18 +154,21 @@ func validateProcResult(t *testing.T, result mapstr.M) {
 		privilegedMode, userID, cgroupNSMode, result.String(),
 	}
 
-	usr, err := user.Current()
-	require.NoError(t, err, formatArgs...)
-
-	gotUser, _ := result["username"].(string)
-
 	gotPpid, ok := result["ppid"].(int)
 	assert.True(t, ok, formatArgs...)
 
 	// Check `exe` field based on process state and permissions
 	gotState, _ := result["state"].(string)
 	isKernelProc := gotPpid == 2
-	canReadExe := privilegedMode && (userID == 0 || usr.Name == gotUser)
+	// Check if we can read the process's exe based on user permissions
+	// /proc/[pid]/exe is readable if:
+	// - We're in privileged mode AND root (container root == host root)
+	// - OR we own the process
+	// In non-privileged mode, container root is NOT the same as host root due to user namespaces
+	gotUsername, _ := result["username"].(string)
+	isOwnProcess := strconv.Itoa(userID) == gotUsername
+	isEffectiveRoot := privilegedMode && userID == 0
+	canReadExe := isEffectiveRoot || isOwnProcess
 
 	switch {
 	case gotState == "zombie":
@@ -176,11 +178,11 @@ func validateProcResult(t *testing.T, result mapstr.M) {
 		// Kernel processes (ppid=2) don't have exe
 		assert.NotContains(t, result, "exe", formatArgs...)
 	case canReadExe:
-		// Privileged mode with matching user should have exe
+		// Effective root or process owner can read exe
 		assert.Contains(t, result, "exe", formatArgs...)
 	default:
-		// Non-privileged or different user - exe may or may not be present
-		// Don't assert either way
+		// Non-privileged or non-owner - exe not readable
+		assert.NotContains(t, result, "exe", formatArgs...)
 	}
 
 	// if privileged or root, look for data from /proc/[pid]/io
