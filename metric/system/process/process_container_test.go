@@ -160,8 +160,9 @@ func validateProcResult(t *testing.T, result mapstr.M) {
 	assert.True(t, ok, formatArgs...)
 
 	// if we're root or the same user as the pid, check `exe`
-	// kernel procs also don't have `exe`
-	if (privilegedMode && (userID == 0 || usr.Name == gotUser)) && gotPpid != 2 {
+	// kernel procs also don't have `exe`, and neither do zombie processes
+	gotState, _ := result["state"].(string)
+	if (privilegedMode && (userID == 0 || usr.Name == gotUser)) && gotPpid != 2 && gotState != "zombie" {
 		assert.Contains(t, result, "exe", formatArgs...)
 	}
 
