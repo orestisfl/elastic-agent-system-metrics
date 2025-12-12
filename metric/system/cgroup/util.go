@@ -472,13 +472,32 @@ func (r *Reader) ProcessCgroupPaths(pid int) (PathList, error) {
 		//
 		// However, when we try to append something like `/../..` to another path, we obviously blow things up.
 		// we need to use the absolute path of the container cgroup
+		// useHostCgroupMount indicates that the path has been resolved to an absolute host path
+		// and should be joined with the host's cgroup mount, not the container's overlay mount.
+		useHostCgroupMount := false
 		if cgroupNSStateFetch(r.logger) && r.rootfsMountpoint.IsSet() {
-			if r.cgroupMountpoints.ContainerizedRootMount == "" {
-				r.logger.Debugf("cgroup for process %d contains a relative cgroup path (%s), but we were not able to find a root cgroup. Cgroup monitoring for this PID may be incomplete",
-					pid, path)
-			} else {
+			// When running in a container with a private cgroup namespace, we may get relative paths
+			// like "/../../user.slice/..." that escape the container's cgroup namespace.
+			// If we have a ContainerizedRootMount, filepath.Join handles the "../" correctly.
+			// If not, we need to fall back to resolving against the host's cgroup mount.
+			// See: https://github.com/elastic/elastic-agent-system-metrics/issues/270
+			if r.cgroupMountpoints.ContainerizedRootMount != "" {
 				r.logger.Debugf("using root mount %s and path %s", r.cgroupMountpoints.ContainerizedRootMount, path)
 				path = filepath.Join(r.cgroupMountpoints.ContainerizedRootMount, path)
+			} else if strings.HasPrefix(path, "/..") {
+				// Fallback: ContainerizedRootMount is empty but path contains escape sequences.
+				// Strip leading "../" components to get the absolute path on the host.
+				// e.g., "/../../user.slice/user-1000.slice/session-520.scope" -> "/user.slice/user-1000.slice/session-520.scope"
+				cleanPath := path
+				for strings.HasPrefix(cleanPath, "/..") {
+					cleanPath = strings.TrimPrefix(cleanPath, "/..")
+				}
+				path = cleanPath
+				useHostCgroupMount = true
+				r.logger.Debugf("resolved escaped cgroup path %s to host path %s for pid %d (ContainerizedRootMount unavailable)", fields[2], path, pid)
+			} else {
+				r.logger.Debugf("cgroup for process %d contains a relative cgroup path (%s), but we were not able to find a root cgroup. Cgroup monitoring for this PID may be incomplete",
+					pid, path)
 			}
 		}
 
@@ -499,14 +518,20 @@ func (r *Reader) ProcessCgroupPaths(pid int) (PathList, error) {
 				continue
 			}
 
-			controllerPath := filepath.Join(r.cgroupMountpoints.V2Loc, path)
-			if r.cgroupMountpoints.V2Loc == "" && !r.rootfsMountpoint.IsSet() {
+			var controllerPath string
+			if useHostCgroupMount {
+				// Path has been resolved to an absolute host path, use the host's cgroup mount
+				controllerPath = r.rootfsMountpoint.ResolveHostFS(filepath.Join("/sys/fs/cgroup", path))
+			} else {
+				controllerPath = filepath.Join(r.cgroupMountpoints.V2Loc, path)
+			}
+			if r.cgroupMountpoints.V2Loc == "" && !r.rootfsMountpoint.IsSet() && !useHostCgroupMount {
 				r.logger.Debugf(`PID %d contains a cgroups V2 path (%s) but no V2 mountpoint was found.
 This may be because metricbeat is running inside a container on a hybrid system.
 To monitor cgroups V2 processess in this way, mount the unified (V2) hierarchy inside
 the container as /sys/fs/cgroup/unified and start the system module with the hostfs setting.`, pid, line)
 				continue
-			} else if r.cgroupMountpoints.V2Loc == "" && r.rootfsMountpoint.IsSet() {
+			} else if r.cgroupMountpoints.V2Loc == "" && r.rootfsMountpoint.IsSet() && !useHostCgroupMount {
 				controllerPath = r.rootfsMountpoint.ResolveHostFS(filepath.Join("/sys/fs/cgroup/unified", path))
 			}
 
