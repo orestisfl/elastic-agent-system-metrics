@@ -59,21 +59,12 @@ func TestContainerMonitoringFromInsideContainer(t *testing.T) {
 	stats, err := testStats.GetSelf()
 	require.NoError(t, err)
 	if runtime.GOOS == "linux" {
-		_, usingHostfs := os.LookupEnv("HOSTFS")
-		isRoot := os.Getuid() == 0
-
-		// When using /hostfs, cgroup access goes through Docker's overlayfs.
-		// Root can read overlayfs paths, but non-root users (like 'nobody') cannot.
-		if usingHostfs && !isRoot {
-			// Non-root users can't read Docker's overlayfs paths
-			require.Nil(t, stats.Cgroup, "cgroup stats should be nil for non-root user with hostfs (uid=%d)", os.Getuid())
-		} else {
-			// Root users, or users not using hostfs, should have cgroup access
-			require.NotNil(t, stats.Cgroup, "cgroup stats should not be nil (uid=%d, hostfs=%v)", os.Getuid(), usingHostfs)
-			cgstats, err := stats.Cgroup.Format()
-			require.NoError(t, err)
-			require.NotEmpty(t, cgstats)
-		}
+		// Cgroups should always be available - cgroup files are world-readable
+		// and our path resolution handles escaped paths like "/../../..." correctly.
+		require.NotNil(t, stats.Cgroup, "cgroup stats should not be nil (uid=%d)", os.Getuid())
+		cgstats, err := stats.Cgroup.Format()
+		require.NoError(t, err)
+		require.NotEmpty(t, cgstats)
 	}
 
 	require.NotEmpty(t, stats.Cmdline)
@@ -172,11 +163,24 @@ func validateProcResult(t *testing.T, result mapstr.M) {
 	gotPpid, ok := result["ppid"].(int)
 	assert.True(t, ok, formatArgs...)
 
-	// if we're root or the same user as the pid, check `exe`
-	// kernel procs also don't have `exe`, and neither do zombie processes
+	// Check `exe` field based on process state and permissions
 	gotState, _ := result["state"].(string)
-	if (privilegedMode && (userID == 0 || usr.Name == gotUser)) && gotPpid != 2 && gotState != "zombie" {
+	isKernelProc := gotPpid == 2
+	canReadExe := privilegedMode && (userID == 0 || usr.Name == gotUser)
+
+	switch {
+	case gotState == "zombie":
+		// Zombie processes don't have /proc/[pid]/exe - it's gone after exit
+		assert.NotContains(t, result, "exe", formatArgs...)
+	case isKernelProc:
+		// Kernel processes (ppid=2) don't have exe
+		assert.NotContains(t, result, "exe", formatArgs...)
+	case canReadExe:
+		// Privileged mode with matching user should have exe
 		assert.Contains(t, result, "exe", formatArgs...)
+	default:
+		// Non-privileged or different user - exe may or may not be present
+		// Don't assert either way
 	}
 
 	// if privileged or root, look for data from /proc/[pid]/io
